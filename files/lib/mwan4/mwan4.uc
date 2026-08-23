@@ -371,7 +371,7 @@ _ensure_init = function() {
 	mwan4.no_ipv6 = (system('ip -6 addr show >/dev/null 2>&1') == 0) ? 0 : 1;
 
 	if (!mwan4.mmx_mask) {
-		mwan4.mmx_mask = uci_get('globals', 'mwan4.mmx_mask') || '0x3F00';
+		mwan4.mmx_mask = uci_get('globals', 'mmx_mask') || '0x3F00';
 		mwan4.mmx_mask = lc(mwan4.mmx_mask);
 	}
 	if (!mwan4.mmx_mask_inv)

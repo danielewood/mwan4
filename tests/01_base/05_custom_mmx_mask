@@ -1,0 +1,29 @@
+Testing that a custom globals.mmx_mask is loaded from UCI.
+
+-- File uci/mwan4.json --
+{
+	"globals": [
+		{
+			".name": "globals",
+			"mmx_mask": "0x00FF0000"
+		}
+	]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+m.set_scriptname('test');
+m.load();
+print('mmx_mask: ' + m.mmx_mask + '\n');
+print('mmx_mask_inv: ' + m.mmx_mask_inv + '\n');
+print('mmx_default: ' + m.mmx_default + '\n');
+print('iface_max: ' + m.iface_max + '\n');
+-- End --
+
+-- Expect stdout --
+mmx_mask: 0x00ff0000
+mmx_mask_inv: 0xff00ffff
+mmx_default: 0xff0000
+iface_max: 252
+-- End --
