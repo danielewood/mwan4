@@ -624,12 +624,38 @@ function set_general_rules() {
 
 // ── nftables Base ────────────────────────────────────────────────────
 
+function _nft_meta_mark_set(mark) {
+	return sprintf('meta mark set meta mark & %s | %s', mwan4.mmx_mask_inv, mark);
+}
+
+function _nft_ct_mark_set(mark) {
+	return sprintf('ct mark set ct mark & %s | %s', mwan4.mmx_mask_inv, mark);
+}
+
+function _mwan_marks(include_default) {
+	let marks = {};
+
+	uci_foreach('interface', function(s) {
+		if (!uci_bool(s.enabled)) return;
+		let id = get_iface_id(s['.name']);
+		if (id && id <= mwan4.iface_max)
+			marks[id2mask(id, mwan4.mmx_mask)] = true;
+	});
+
+	marks[mwan4.mmx_blackhole] = true;
+	marks[mwan4.mmx_unreachable] = true;
+	if (include_default)
+		marks[mwan4.mmx_default] = true;
+
+	return sort(keys(marks), (a, b) => +a - +b);
+}
+
 function _nft_set_check_rules(family, zero_check) { // ucode-lsp disable
 	let flag = (family == 'ipv4') ? NFT_IPV4 : NFT_IPV6;
 	let mark_expr = zero_check
 		? sprintf('meta mark & %s == 0', mwan4.mmx_mask)
 		: sprintf('meta mark & %s != %s', mwan4.mmx_mask, mwan4.mmx_default);
-	let mark_set = sprintf('meta mark set meta mark & %s | %s', mwan4.mmx_mask_inv, mwan4.mmx_default);
+	let mark_set = _nft_meta_mark_set(mwan4.mmx_default);
 
 	let rules = [];
 	for (let settype in ['custom', 'connected', 'dynamic'])
@@ -708,10 +734,12 @@ function set_general_nftables() {
 		);
 		push(L, ...ra_exempt);
 
-		// Restore mark from conntrack
-		// Use single-register form (ct mark & constant) for kernel compatibility;
-		// meta mark is 0 at this point so the masked-OR form is equivalent.
-		push(L, sprintf('\t\tct mark & %s != 0 meta mark set ct mark & %s', mwan4.mmx_mask, mwan4.mmx_mask));
+		// Restore only mwan4's field from conntrack. A rule per configured
+		// mark avoids cross-register bitwise expressions unsupported by some
+		// kernels while preserving packet-mark fields owned by other services.
+		for (let mark in _mwan_marks(true))
+			push(L, sprintf('\t\tct mark & %s == %s %s',
+				mwan4.mmx_mask, mark, _nft_meta_mark_set(mark)));
 		// Interface input
 		push(L, sprintf('\t\tmeta mark & %s == 0 jump %s_ifaces_in', mwan4.mmx_mask, NFT_PREFIX));
 		// Pre-rule set checks (mark == 0)
@@ -720,9 +748,10 @@ function set_general_nftables() {
 			push(L, ..._nft_set_check_rules('ipv6', true));
 		// User rules
 		push(L, sprintf('\t\tmeta mark & %s == 0 jump %s_rules', mwan4.mmx_mask, NFT_PREFIX));
-		// Save to conntrack — meta mark only has mwan4 bits at this point,
-		// so a full copy avoids the cross-register bitwise that older kernels reject.
-		push(L, '\t\tct mark set meta mark');
+		// Save only mwan4's field to conntrack using the same compatible form.
+		for (let mark in _mwan_marks(true))
+			push(L, sprintf('\t\tmeta mark & %s == %s %s',
+				mwan4.mmx_mask, mark, _nft_ct_mark_set(mark)));
 		// Post-rule set checks (mark != default)
 		push(L, ..._nft_set_check_rules('ipv4', false));
 		if (mwan4.no_ipv6 == 0)
@@ -912,10 +941,11 @@ function rebuild_iface_nftfile() {
 
 			push(L, '', sprintf('\tchain %s {', chain_name));
 			for (let settype in ['custom', 'connected', 'dynamic'])
-				push(L, sprintf('\t\tiifname "%s" %s saddr @%s_%s_%s meta mark & %s == 0 meta mark set %s comment "default"',
-					device, nftflag, NFT_PREFIX, settype, family, mwan4.mmx_mask, mwan4.mmx_default));
-			push(L, sprintf('\t\tiifname "%s" meta mark & %s == 0 meta mark set %s comment "%s"',
-				device, mwan4.mmx_mask, mark, iface));
+				push(L, sprintf('\t\tiifname "%s" %s saddr @%s_%s_%s meta mark & %s == 0 %s comment "default"',
+					device, nftflag, NFT_PREFIX, settype, family, mwan4.mmx_mask,
+					_nft_meta_mark_set(mwan4.mmx_default)));
+			push(L, sprintf('\t\tiifname "%s" meta mark & %s == 0 %s comment "%s"',
+				device, mwan4.mmx_mask, _nft_meta_mark_set(mark), iface));
 			push(L, '\t}');
 
 			let nfproto = (family == 'ipv4') ? 'ipv4' : 'ipv6';
@@ -1004,12 +1034,12 @@ function _create_strategy_chain(strategy_name, accumulator) { // ucode-lsp disab
 				let r = active[i];
 				if (i == length(active) - 1) {
 					// Last route: catch-all
-					push(L, sprintf('\t\tmeta mark & %s == 0 meta mark set %s comment "%s %d %d"',
-						mwan4.mmx_mask, r.mark, r.iface, r.weight, total_weight));
+					push(L, sprintf('\t\tmeta mark & %s == 0 %s comment "%s %d %d"',
+						mwan4.mmx_mask, _nft_meta_mark_set(r.mark), r.iface, r.weight, total_weight));
 				} else {
 					// Probabilistic: weight/remaining chance
-					push(L, sprintf('\t\tmeta mark & %s == 0 numgen random mod %d < %d meta mark set %s comment "%s %d %d"',
-						mwan4.mmx_mask, remaining, r.weight, r.mark, r.iface, r.weight, total_weight));
+					push(L, sprintf('\t\tmeta mark & %s == 0 numgen random mod %d < %d %s comment "%s %d %d"',
+						mwan4.mmx_mask, remaining, r.weight, _nft_meta_mark_set(r.mark), r.iface, r.weight, total_weight));
 					remaining -= r.weight;
 				}
 			}
@@ -1017,13 +1047,13 @@ function _create_strategy_chain(strategy_name, accumulator) { // ucode-lsp disab
 			// All offline: add device-based defaults for any with devices
 			let offline_with_dev = filter(routes, r => !r.is_online && r.device);
 			for (let r in offline_with_dev)
-				push(L, sprintf('\t\toifname "%s" meta mark & %s == 0 meta mark set %s comment "out %s %s"',
-					r.device, mwan4.mmx_mask, mwan4.mmx_default, r.iface, r.device));
+				push(L, sprintf('\t\toifname "%s" meta mark & %s == 0 %s comment "out %s %s"',
+					r.device, mwan4.mmx_mask, _nft_meta_mark_set(mwan4.mmx_default), r.iface, r.device));
 		}
 
 		// Last resort fallback (always last in chain)
-		push(L, sprintf('\t\tmeta mark & %s == 0 meta mark set %s comment "%s"',
-			mwan4.mmx_mask, last_resort_mark, last_resort));
+		push(L, sprintf('\t\tmeta mark & %s == 0 %s comment "%s"',
+			mwan4.mmx_mask, _nft_meta_mark_set(last_resort_mark), last_resort));
 		push(L, '\t}');
 	}
 
@@ -1157,9 +1187,9 @@ function _build_user_rule(s, family_flag) { // ucode-lsp disable
 	let mark_action;
 	let is_strategy_jump = false;
 	switch (use_strategy) {
-		case 'default':     mark_action = sprintf('meta mark set %s', mwan4.mmx_default); break;
-		case 'unreachable': mark_action = sprintf('meta mark set %s', mwan4.mmx_unreachable); break;
-		case 'blackhole':   mark_action = sprintf('meta mark set %s', mwan4.mmx_blackhole); break;
+		case 'default':     mark_action = _nft_meta_mark_set(mwan4.mmx_default); break;
+		case 'unreachable': mark_action = _nft_meta_mark_set(mwan4.mmx_unreachable); break;
+		case 'blackhole':   mark_action = _nft_meta_mark_set(mwan4.mmx_blackhole); break;
 		default:
 			is_strategy_jump = true;
 			mark_action = sprintf('jump %s_strategy_%s_%s', NFT_PREFIX, use_strategy, family_flag);
@@ -1218,24 +1248,29 @@ function set_user_rules() {
 		}
 	}
 
-	// Sticky map definitions (maps source address -> mark for session persistence)
+	// Sticky sets retain one source-address set per possible mark. This is more
+	// verbose than an address-to-mark map, but lets every restore use a constant
+	// mask-preserving assignment on kernels without cross-register bitwise ops.
 	for (let rule_name in keys(sticky_set_defs)) {
 		let timeout = sticky_set_defs[rule_name];
-		push(L,
-			sprintf('\tmap %s_rule_ipv4_%s {', NFT_PREFIX, rule_name),
-			'\t\ttypeof ip saddr : meta mark',
-			'\t\tflags timeout',
-			sprintf('\t\ttimeout %ds', timeout),
-			'\t}'
-		);
-		if (mwan4.no_ipv6 == 0) {
+		for (let mark in _mwan_marks(false)) {
+			let suffix = substr(mark, 2);
 			push(L,
-				sprintf('\tmap %s_rule_ipv6_%s {', NFT_PREFIX, rule_name),
-				'\t\ttypeof ip6 saddr : meta mark',
+				sprintf('\tset %s_rule_ipv4_%s_%s {', NFT_PREFIX, rule_name, suffix),
+				'\t\ttypeof ip saddr',
 				'\t\tflags timeout',
 				sprintf('\t\ttimeout %ds', timeout),
 				'\t}'
 			);
+			if (mwan4.no_ipv6 == 0) {
+				push(L,
+					sprintf('\tset %s_rule_ipv6_%s_%s {', NFT_PREFIX, rule_name, suffix),
+					'\t\ttypeof ip6 saddr',
+					'\t\tflags timeout',
+					sprintf('\t\ttimeout %ds', timeout),
+					'\t}'
+				);
+			}
 		}
 	}
 
@@ -1248,15 +1283,18 @@ function set_user_rules() {
 		let saddr = (fam == 'ipv4') ? 'ip saddr' : 'ip6 saddr';
 
 		push(L, sprintf('\tchain %s_rule_%s_%s {', NFT_PREFIX, rule_name, fam));
-		// Sticky map lookup: restore mark from previous session
-		push(L, sprintf('\t\tmeta mark & %s == 0 meta mark set %s map @%s_rule_%s_%s',
-			mwan4.mmx_mask, saddr, NFT_PREFIX, fam, rule_name));
+		// Restore a previous assignment while preserving non-mwan4 mark bits.
+		for (let mark in _mwan_marks(false))
+			push(L, sprintf('\t\tmeta mark & %s == 0 %s @%s_rule_%s_%s_%s %s',
+				mwan4.mmx_mask, saddr, NFT_PREFIX, fam, rule_name, substr(mark, 2),
+				_nft_meta_mark_set(mark)));
 		// No sticky hit: let strategy assign mark
 		push(L, sprintf('\t\tmeta mark & %s == 0 jump %s_strategy_%s_%s',
 			mwan4.mmx_mask, NFT_PREFIX, strategy, fam));
-		// Update sticky map with current assignment
-		push(L, sprintf('\t\tmeta mark & %s != 0 meta mark & %s != %s update @%s_rule_%s_%s { %s : meta mark }',
-			mwan4.mmx_mask, mwan4.mmx_mask, mwan4.mmx_default, NFT_PREFIX, fam, rule_name, saddr));
+		// Persist the selected assignment in its corresponding timeout set.
+		for (let mark in _mwan_marks(false))
+			push(L, sprintf('\t\tmeta mark & %s == %s update @%s_rule_%s_%s_%s { %s }',
+				mwan4.mmx_mask, mark, NFT_PREFIX, fam, rule_name, substr(mark, 2), saddr));
 		push(L, '\t}');
 	}
 

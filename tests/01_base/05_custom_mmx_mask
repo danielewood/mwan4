@@ -7,6 +7,13 @@ Testing that a custom globals.mmx_mask is loaded from UCI.
 			".name": "globals",
 			"mmx_mask": "0x00FF0000"
 		}
+	],
+	"interface": [
+		{
+			".name": "wan",
+			"enabled": "1",
+			"family": ["ipv4"]
+		}
 	]
 }
 -- End --
@@ -19,6 +26,13 @@ print('mmx_mask: ' + m.mmx_mask + '\n');
 print('mmx_mask_inv: ' + m.mmx_mask_inv + '\n');
 print('mmx_default: ' + m.mmx_default + '\n');
 print('iface_max: ' + m.iface_max + '\n');
+m.init();
+m.nft_file('create', 'dynamic');
+m.set_general_nftables();
+m.nft_file('install', 'dynamic');
+let rules = global.mocklib.read_captured('/usr/share/nftables.d/ruleset-post/10-mwan4.nft');
+print('restores_preserve: ' + (index(rules, 'ct mark & 0x00ff0000 == 0x10000 meta mark set meta mark & 0xff00ffff | 0x10000') >= 0) + '\n');
+print('saves_preserve: ' + (index(rules, 'meta mark & 0x00ff0000 == 0x10000 ct mark set ct mark & 0xff00ffff | 0x10000') >= 0) + '\n');
 -- End --
 
 -- Expect stdout --
@@ -26,4 +40,6 @@ mmx_mask: 0x00ff0000
 mmx_mask_inv: 0xff00ffff
 mmx_default: 0xff0000
 iface_max: 252
+restores_preserve: true
+saves_preserve: true
 -- End --
